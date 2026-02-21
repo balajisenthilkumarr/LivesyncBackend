@@ -1,6 +1,7 @@
 import bcrypt from 'bcryptjs';
 
 export default async function (fastify, opts) {
+  console.log('Entering Auth routes registration');
   const db = fastify.mongo.db;
 
   // SIGNUP (Dual-collection write)
@@ -137,5 +138,173 @@ export default async function (fastify, opts) {
     } catch (err) {
       reply.status(401).send({ error: 'Invalid or expired token' });
     }
+  });
+
+  // Microsoft OAuth initiation
+  fastify.get('/ms', async (request, reply) => {
+    const { config } = await import('../lib/config.js');
+    const params = new URLSearchParams({
+      client_id: config.microsoft.clientId,
+      response_type: 'code',
+      redirect_uri: config.microsoft.redirectUri,
+      scope: config.microsoft.scopes.join(' '),
+      response_mode: 'query'
+    });
+    const url = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?${params.toString()}`;
+    return reply.redirect(url);
+  });
+
+  // Microsoft OAuth callback
+  fastify.get('/ms/callback', async (request, reply) => {
+    const { code } = request.query;
+    if (!code) return reply.status(400).send({ error: 'No code provided' });
+
+    const { config } = await import('../lib/config.js');
+    const { tokenService } = await import('../services/tokenService.js');
+    const tokens = tokenService(db);
+
+    try {
+      const params = new URLSearchParams({
+        client_id: config.microsoft.clientId,
+        client_secret: config.microsoft.clientSecret,
+        code,
+        grant_type: 'authorization_code',
+        redirect_uri: config.microsoft.redirectUri
+      });
+
+      const response = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: params.toString()
+      });
+
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error_description || 'Microsoft token exchange failed');
+
+      // For MVP/Demo, we'll use a fixed userId or extract from profile if needed
+      // Ideally, we'd verify the user via JWT before this, but for the "Connect" flow:
+      const userId = 'demo-user'; 
+
+      await tokens.saveTokens(userId, 'excel', {
+        access_token: data.access_token,
+        refresh_token: data.refresh_token,
+        expires_in: data.expires_in
+      });
+
+      // Generate a session token for the frontend
+      const sessionToken = fastify.jwt.sign({ id: userId, email: 'demo@example.com' });
+
+      // Redirect back to frontend with token in fragment
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+      const redirectUrl = `${frontendUrl}/dashboard#token=${sessionToken}&connection=success&provider=microsoft`;
+      
+      console.log(`[AUTH] MS Callback Success. Redirecting to: ${redirectUrl}`);
+      return reply.redirect(redirectUrl);
+    } catch (error) {
+      console.error('[AUTH] Microsoft OAuth Error:', error);
+      return reply.status(500).send({ error: error.message });
+    }
+  });
+
+  // Google OAuth initiation
+  fastify.get('/google', async (request, reply) => {
+    const { config } = await import('../lib/config.js');
+    const params = new URLSearchParams({
+      client_id: config.google.clientId,
+      redirect_uri: config.google.redirectUri,
+      response_type: 'code',
+      scope: config.google.scopes.join(' '),
+      access_type: 'offline',
+      prompt: 'consent'
+    });
+    const url = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+    return reply.redirect(url);
+  });
+
+  // Google OAuth callback
+  fastify.get('/google/callback', async (request, reply) => {
+    const { code } = request.query;
+    if (!code) return reply.status(400).send({ error: 'No code provided' });
+
+    const { config } = await import('../lib/config.js');
+    const { tokenService } = await import('../services/tokenService.js');
+    const tokens = tokenService(db);
+
+    try {
+      const params = new URLSearchParams({
+        client_id: config.google.clientId,
+        client_secret: config.google.clientSecret,
+        code,
+        grant_type: 'authorization_code',
+        redirect_uri: config.google.redirectUri
+      });
+
+      const response = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: params.toString()
+      });
+
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error_description || 'Google token exchange failed');
+
+      // Use JWT user if available, fallback to demo for standalone auth testing
+      let userId = 'demo-user';
+      try {
+         await request.jwtVerify();
+         userId = request.user.id;
+      } catch (e) {
+         console.warn('[AUTH] Google callback using demo-user (no JWT found)');
+      }
+
+      await tokens.saveTokens(userId, 'google', {
+        access_token: data.access_token,
+        refresh_token: data.refresh_token,
+        expires_in: data.expires_in
+      });
+
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+      const redirectUrl = `${frontendUrl}/dashboard#connection=success&provider=google`;
+      
+      console.log(`[AUTH] Google Callback Success for user ${userId}. Redirecting.`);
+      return reply.redirect(redirectUrl);
+    } catch (error) {
+      console.error('[AUTH] Google OAuth Error:', error);
+      return reply.status(500).send({ error: error.message });
+    }
+  });
+
+  // DISCONNECT GOOGLE
+  fastify.delete('/google/disconnect', async (request, reply) => {
+    let userId = 'demo-user';
+    try {
+      await request.jwtVerify();
+      userId = request.user.id;
+    } catch (e) {}
+
+    const { tokenService } = await import('../services/tokenService.js');
+    const tokens = tokenService(db);
+    
+    console.log(`[AUTH] Disconnecting Google account for user: ${userId}`);
+    await tokens.deleteTokens(userId, 'google');
+    
+    return { status: 'disconnected', provider: 'google', userId };
+  });
+
+  // DISCONNECT MICROSOFT
+  fastify.delete('/ms/disconnect', async (request, reply) => {
+    let userId = 'demo-user';
+    try {
+      await request.jwtVerify();
+      userId = request.user.id;
+    } catch (e) {}
+
+    const { tokenService } = await import('../services/tokenService.js');
+    const tokens = tokenService(db);
+    
+    console.log(`[AUTH] Disconnecting Microsoft account for user: ${userId}`);
+    await tokens.deleteTokens(userId, 'excel');
+    
+    return { status: 'disconnected', provider: 'microsoft', userId };
   });
 }

@@ -22,6 +22,7 @@ export const tokenService = (db) => ({
 
     try {
       let newTokens;
+      console.log(`[TOKEN-SERVICE] Token for ${provider} is expiring or expired. Attempting refresh for user ${userId}...`);
       if (provider === 'google') {
         newTokens = await this.refreshGoogleToken(refresh_token);
       } else if (provider === 'excel') {
@@ -29,6 +30,7 @@ export const tokenService = (db) => ({
       }
 
       if (newTokens) {
+        console.log(`[TOKEN-SERVICE] Successfully refreshed ${provider} token for user ${userId}.`);
         await this.saveTokens(userId, provider, {
           ...newTokens,
           refresh_token: newTokens.refresh_token || refresh_token // Keep old if not provided
@@ -36,7 +38,7 @@ export const tokenService = (db) => ({
         return newTokens.access_token;
       }
     } catch (error) {
-      console.error(`Failed to refresh ${provider} token:`, error);
+      console.error(`[TOKEN-SERVICE] Failed to refresh ${provider} token for user ${userId}:`, error.message);
     }
 
     return access_token;

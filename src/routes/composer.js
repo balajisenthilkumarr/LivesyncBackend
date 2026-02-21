@@ -1,30 +1,17 @@
 import { aggregateMergedMetrics, calculateColumnMetrics } from '../services/aggregator.js';
-import { fetchGoogleColumnData } from '../services/googleSheets.js';
-import { fetchExcelColumnData } from '../services/excelApi.js';
+import { fetchGoogleColumnData, analyzeSheetColumns } from '../services/googleSheets.js';
+import { fetchExcelColumnData, analyzeExcelColumns } from '../services/excelApi.js';
 import { tokenService } from '../services/tokenService.js';
+import { cacheService } from '../services/cacheService.js';
+import { fetchSheetData } from '../services/dataService.js';
 
 export default async function (fastify, opts) {
+  console.log('[COMPOSER] Registering routes...');
   const db = fastify.mongo.db;
   const tokens = tokenService(db);
 
-  // Helper to fetch data from any sheet type
-  async function fetchSheetData(sheet, columns, userId) {
-    const results = {};
-    const accessToken = await tokens.getValidAccessToken(userId, sheet.type === 'google' ? 'google' : 'excel');
-    
-    if (!accessToken) throw new Error(`${sheet.type} account not connected`);
-
-    for (const col of columns) {
-      let data = [];
-      if (sheet.type === 'google') {
-        data = await fetchGoogleColumnData(sheet.id, col, accessToken);
-      } else if (sheet.type === 'excel') {
-        data = await fetchExcelColumnData(sheet.id, col, accessToken);
-      }
-      results[col] = calculateColumnMetrics(data);
-    }
-    return results;
-  }
+  fastify.get('/ping', async () => ({ status: 'composer active (GET)', timestamp: new Date() }));
+  fastify.post('/ping', async () => ({ status: 'composer active (POST)', timestamp: new Date() }));
 
   // CUSTOMIZE (GET: View all available columns | POST: Save customized keys)
   fastify.get('/:sheetId/customize', async (request, reply) => {
@@ -37,6 +24,59 @@ export default async function (fastify, opts) {
       sheetId: sheet.id,
       availableColumns: sheet.columns,
       customColumns: sheet.customColumns || []
+    };
+  });
+
+  // PREVIEW (Accepts 'columns' in body for live reorganization preview)
+  fastify.post('/:sheetId/preview', {
+    schema: {
+      params: { sheetId: { type: 'string' } },
+      body: {
+        type: 'object',
+        properties: { 
+          columns: { type: 'array', items: { type: 'string' } } 
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const { sheetId } = request.params;
+    const bodyColumns = request.body?.columns;
+    const userId = request.user?.id || 'demo-user';
+    const forceRefresh = request.query?.refresh === 'true';
+    
+    console.log(`[PREVIEW] Incoming request for sheetId: ${sheetId} (Refresh: ${forceRefresh})`);
+    
+    const sheet = await db.collection('sheets').findOne({ id: sheetId, userId });
+    if (!sheet) {
+      return reply.status(404).send({ error: 'Sheet not found' });
+    }
+
+    // Safely extract columns array
+    const colArray = Array.isArray(sheet.columns) ? sheet.columns : (sheet.columns?.columns || []);
+    
+    const columnsToFetch = bodyColumns 
+      ? bodyColumns
+      : (sheet.customColumns?.length > 0 ? sheet.customColumns : colArray.slice(0, 5));
+
+    try {
+      const metrics = await fetchSheetData(sheet, columnsToFetch, userId, tokens, forceRefresh);
+      return {
+        sheetId,
+        metrics,
+        columns: columnsToFetch
+      };
+    } catch (error) {
+      console.error(`[PREVIEW] Fatal error fetching metrics for ${sheetId}:`, error);
+      return reply.status(500).send({ error: 'Failed to fetch dashboard metrics' });
+    }
+  });
+
+  // DEBUG: Simplified preview test
+  fastify.post('/:sheetId/preview-test', async (request) => {
+    return { 
+      msg: 'Preview test route reached', 
+      sheetId: request.params.sheetId,
+      originalUrl: request.url 
     };
   });
 
@@ -67,7 +107,7 @@ export default async function (fastify, opts) {
     );
 
     // 3. Fetch LIVE data
-    const liveMetrics = await fetchSheetData(sheet, columns, userId);
+    const liveMetrics = await fetchSheetData(sheet, columns, userId, tokens);
 
     return {
       sheetId,
@@ -124,7 +164,7 @@ export default async function (fastify, opts) {
     // 3. Fetch LIVE metrics
     // We pass the full config to the aggregator
     const allSheetMetrics = await Promise.all(
-      sheetsMetadata.map(sheet => fetchSheetData(sheet, columnConfig.map(c => c.name), userId))
+      sheetsMetadata.map(sheet => fetchSheetData(sheet, columnConfig.map(c => c.name), userId, tokens))
     );
 
     // 4. Aggregate across all sheets (Math logic applied here)

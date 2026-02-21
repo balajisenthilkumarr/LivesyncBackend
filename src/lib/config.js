@@ -9,6 +9,7 @@ export const config = {
     clientId: process.env.GOOGLE_CLIENT_ID,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET,
     apiKey: process.env.GOOGLE_API_KEY,
+    redirectUri: process.env.GOOGLE_REDIRECT_URI || `${process.env.BASE_URL}/api/auth/google/callback`,
     scopes: [
       'https://www.googleapis.com/auth/spreadsheets.readonly',
       'https://www.googleapis.com/auth/drive.metadata.readonly',
@@ -20,8 +21,10 @@ export const config = {
   microsoft: {
     clientId: process.env.MS_GRAPH_CLIENT_ID,
     clientSecret: process.env.MS_GRAPH_CLIENT_SECRET,
+    redirectUri: process.env.MS_REDIRECT_URI || `${process.env.BASE_URL || 'http://localhost:3001'}/api/auth/ms/callback`,
     scopes: ['https://graph.microsoft.com/Files.Read', 'offline_access']
   },
+  baseUrl: process.env.BASE_URL || 'http://localhost:3001',
   webhook: {
     url: process.env.WEBHOOK_URL,
     secret: process.env.WEBHOOK_SECRET,

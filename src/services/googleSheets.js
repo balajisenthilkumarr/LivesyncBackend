@@ -27,9 +27,10 @@ export async function analyzeSheetColumns(sheetId, accessToken) {
       key: !accessToken ? config.googlelibrarykey : undefined
     });
     
-    return rows.data.values?.[0] || [];
+    const columns = rows.data.values?.[0] || [];
+    return { columns, sheetTitle: sheet.properties.title };
   } catch (error) {
-    console.error('Error analyzing Google Sheet columns:', error);
+    console.error('[GOOGLE] Error analyzing columns:', error.message);
     throw error;
   }
 }
@@ -63,7 +64,19 @@ export function extractGoogleSheetId(url) {
   return match ? match[1] : null;
 }
 
-export async function fetchGoogleColumnData(sheetId, columnName, accessToken) {
+/**
+ * Converts a 0-based index to an Excel/Google column address (A, B, C...)
+ */
+function indexToColumn(index) {
+  let column = '';
+  while (index >= 0) {
+    column = String.fromCharCode((index % 26) + 65) + column;
+    index = Math.floor(index / 26) - 1;
+  }
+  return column;
+}
+
+export async function fetchGoogleColumnData(sheetId, columnName, accessToken, prefetchedColumns = null) {
   const auth = new google.auth.OAuth2();
   if (accessToken) {
     auth.setCredentials({ access_token: accessToken });
@@ -74,11 +87,25 @@ export async function fetchGoogleColumnData(sheetId, columnName, accessToken) {
     auth: accessToken ? auth : undefined 
   });
   
-  // Convert column name to A1 notation if needed, but usually we just use the column letter
-  // For simplicity, we'll assume columnName passed is like 'A', 'B', etc.
-  const range = `${columnName}:${columnName}`; 
-
   try {
+    // 1. Find the column index
+    const meta = (prefetchedColumns && typeof prefetchedColumns === 'object' && !Array.isArray(prefetchedColumns))
+      ? prefetchedColumns
+      : { columns: (Array.isArray(prefetchedColumns) ? prefetchedColumns : (await analyzeSheetColumns(sheetId, accessToken)).columns) };
+    
+    const columns = meta.columns;
+    const sheetTitle = meta.sheetTitle || 'Sheet1';
+    const colIndex = columns.indexOf(columnName);
+    
+    if (colIndex === -1) {
+      console.warn(`[GOOGLE] Column "${columnName}" not found in sheet ${sheetId}. Available: ${columns.join(', ')}`);
+      return [];
+    }
+    
+    const colAddr = indexToColumn(colIndex);
+    const range = `${sheetTitle}!${colAddr}2:${colAddr}100`; 
+    console.log(`[GOOGLE-v3] Fetching data for "${columnName}" at ${range}`);
+
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: sheetId,
       range: range,
@@ -188,6 +215,60 @@ export async function setupGoogleWebhook(sheetId, callbackUrl, accessToken) {
     return scriptId;
   } catch (error) {
     console.error('Error deploying Apps Script:', error);
+    throw error;
+  }
+}
+
+export async function deleteGoogleWebhook(scriptId, accessToken) {
+  const auth = new google.auth.OAuth2();
+  auth.setCredentials({ access_token: accessToken });
+  const script = google.script({ version: 'v1', auth });
+
+  try {
+    console.log(`[GOOGLE] Deleting Apps Script project: ${scriptId}`);
+    await script.projects.delete({ scriptId });
+    return true;
+  } catch (error) {
+    console.warn(`[GOOGLE] Failed to delete Apps Script project ${scriptId}:`, error.message);
+    return false;
+  }
+}
+
+export async function fetchGoogleSnapshot(sheetId, accessToken) {
+  const auth = new google.auth.OAuth2();
+  if (accessToken) {
+    auth.setCredentials({ access_token: accessToken });
+  }
+
+  const sheets = google.sheets({ 
+    version: 'v4', 
+    auth: accessToken ? auth : undefined 
+  });
+
+  try {
+    console.log(`[ULTRA] Fetching full Google Snapshot for: ${sheetId}`);
+    const meta = await sheets.spreadsheets.get({
+      spreadsheetId: sheetId,
+      key: !accessToken ? config.googlelibrarykey : undefined
+    });
+
+    const sheetTitle = meta.data.sheets?.[0]?.properties?.title || 'Sheet1';
+    
+    // FETCH BROAD RANGE: Ensure we get up to ZZ columns and 5000 rows and avoid A:Z restriction
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId: sheetId,
+      range: `${sheetTitle}!A1:ZZ5000`, 
+      key: !accessToken ? config.googlelibrarykey : undefined
+    });
+
+    const rows = response.data.values || [];
+    const headers = rows[0] || [];
+    const dataRows = rows.slice(1);
+
+    console.log(`[ULTRA] Snapshot captured: ${headers.length} columns, ${dataRows.length} rows.`);
+    return { headers, data: dataRows, sheetTitle };
+  } catch (error) {
+    console.error(`[ULTRA] Google Snapshot failed:`, error.message);
     throw error;
   }
 }

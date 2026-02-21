@@ -1,31 +1,72 @@
-export function calculateColumnMetrics(values) {
-  // Strict numeric detection: Filter out anything that isn't a valid number
-  const numbers = values
-    .map(val => {
-      if (typeof val === 'number') return val;
-      if (typeof val === 'string') {
-        const clean = val.replace(/[$,]/g, ''); // Basic currency/separator stripping
-        const n = parseFloat(clean);
-        return isNaN(n) ? null : n;
-      }
-      return null;
-    })
-    .filter(val => val !== null);
+export function calculateColumnMetrics(values, columnName = "") {
+  const rowCount = values.length;
+  // console.log(`[AGGREGATOR-v4] Single-pass metrics for "${columnName}" (${rowCount} rows).`);
 
-  // If the majority of values aren't numeric, we shouldn't return metrics for this column
-  if (numbers.length === 0 || numbers.length < (values.length * 0.1)) {
-    return null; // Return null to indicate this is likely a text/label column
+  let sum = 0;
+  let countNumeric = 0;
+  let max = -Infinity;
+  const valueCounts = {};
+  let nonBlankCount = 0;
+
+  const isDateColumn = columnName.toLowerCase().includes('date') || columnName.toLowerCase().includes('time');
+
+  // Single Pass through the data
+  for (let i = 0; i < rowCount; i++) {
+    let val = values[i];
+    
+    // Handle Excel Object Wrapping
+    if (val && typeof val === 'object' && val.hasOwnProperty('value')) val = val.value;
+    
+    if (val === null || val === undefined || String(val).trim() === "") continue;
+    
+    nonBlankCount++;
+    const stringVal = String(val).trim();
+    
+    // 1. Categorical Accumulation (Always track for fallback/top-result)
+    valueCounts[stringVal] = (valueCounts[stringVal] || 0) + 1;
+
+    // 2. Numeric Accumulation (Skip if it's explicitly a Date column)
+    if (!isDateColumn) {
+      let num = typeof val === 'number' ? val : NaN;
+      if (isNaN(num) && typeof val === 'string') {
+        const clean = val.replace(/[$,]/g, '').trim();
+        num = parseFloat(clean);
+      }
+      
+      if (!isNaN(num)) {
+        sum += num;
+        countNumeric++;
+        if (num > max) max = num;
+      }
+    }
   }
 
-  const sum = numbers.reduce((a, b) => a + b, 0);
-  const avg = sum / numbers.length;
-  const max = Math.max(...numbers);
+  // Decision Logic: Is it primarily numeric?
+  const isNumeric = countNumeric > 0 && countNumeric >= (nonBlankCount * 0.5) && !isDateColumn;
+
+  if (isNumeric) {
+    return {
+      type: 'numeric',
+      count: countNumeric,
+      sum: parseFloat(sum.toFixed(2)),
+      avg: parseFloat((sum / countNumeric).toFixed(2)),
+      max: max === -Infinity ? 0 : max
+    };
+  }
+
+  // Fallback to Categorical
+  const sortedCategories = Object.entries(valueCounts)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 3)
+    .map(([name, count]) => ({ name, count }));
 
   return {
-    count: numbers.length,
-    sum: parseFloat(sum.toFixed(2)),
-    avg: parseFloat(avg.toFixed(2)),
-    max: parseFloat(max.toFixed(2))
+    type: 'categorical',
+    count: nonBlankCount,
+    unique: Object.keys(valueCounts).length,
+    top1: sortedCategories[0]?.name || 'None',
+    top1_count: sortedCategories[0]?.count || 0,
+    categories: sortedCategories
   };
 }
 
